@@ -462,39 +462,33 @@ if st.session_state.img_hash is None:
 img_pil = Image.open(io.BytesIO(st.session_state.img_bytes))
 
 # "New Image" button top-right
-_, col_tr = st.columns([5, 1])
-with col_tr:
-    st.markdown('<div class="btn-ghost">', unsafe_allow_html=True)
-    if st.button("↩ New Image"):
-        for k, v in DEFAULTS.items():
-            st.session_state[k] = v
-        st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
+st.markdown('<div class="btn-ghost" style="text-align: right; margin-bottom: 1rem;">', unsafe_allow_html=True)
+if st.button("↩ New Image"):
+    for k, v in DEFAULTS.items():
+        st.session_state[k] = v
+    st.rerun()
+st.markdown("</div>", unsafe_allow_html=True)
 
-# Centered image display — use st.image directly (no wrapping divs)
-_, col_img, _ = st.columns([1, 5, 1])
-with col_img:
-    st.image(img_pil, use_container_width=True)
-    size_kb = st.session_state.img_size / 1024
-    st.markdown(
-        f'<p style="text-align:center;color:#475569;font-size:.82rem;margin-top:.3rem;margin-bottom:1.5rem;">'
-        f'{st.session_state.img_name} · {size_kb:.1f} KB · {img_pil.width}×{img_pil.height}</p>',
-        unsafe_allow_html=True,
-    )
+# Centered image display
+st.image(img_pil, use_container_width=True)
+size_kb = st.session_state.img_size / 1024
+st.markdown(
+    f'<p style="text-align:center;color:#475569;font-size:.82rem;margin-top:.3rem;margin-bottom:1.5rem;">'
+    f'{st.session_state.img_name} · {size_kb:.1f} KB · {img_pil.width}×{img_pil.height}</p>',
+    unsafe_allow_html=True,
+)
 
 # ── State 2: Awaiting analysis ────────────────────────────────────────
 if st.session_state.analysis is None:
-    _, col_btn, _ = st.columns([2, 2, 2])
-    with col_btn:
-        if st.button("✨  Analyze Image"):
-            with st.spinner("Analyzing image…"):
-                try:
-                    b64 = to_b64(img_pil)
-                    resp = hf_chat([{
-                        "role": "user",
-                        "content": [
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                            {"type": "text", "text": """\
+    if st.button("✨  Analyze Image", use_container_width=True):
+        with st.spinner("Analyzing image…"):
+            try:
+                b64 = to_b64(img_pil)
+                resp = hf_chat([{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                        {"type": "text", "text": """\
 You are VisionAI, an AI image understanding assistant.
 
 Analyze the uploaded image carefully and describe only what is visibly present. Do not guess, assume, or invent details.
@@ -528,57 +522,55 @@ Rules:
 - Do not mention that you are an AI.
 - Do not describe your analysis process.
 - If text is present but unreadable, say "Unreadable text is visible.\""""}
-                        ]
-                    }])
-                    st.session_state.analysis = resp
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"API Error: {e}")
+                    ]
+                }])
+                st.session_state.analysis = resp
+                st.rerun()
+            except Exception as e:
+                st.error(f"API Error: {e}")
     st.stop()
 
 # ── State 3+: Analysis ready ──────────────────────────────────────────
-_, col_main, _ = st.columns([1, 5, 1])
-with col_main:
-    desc_text, detail_rows = parse_analysis(st.session_state.analysis)
+desc_text, detail_rows = parse_analysis(st.session_state.analysis)
 
-    # Description card
-    st.markdown("""
-    <div class="glass-panel">
+# Description card
+st.markdown("""
+<div class="glass-panel">
+    <div class="panel-heading">
+        <span style="font-size:1.1rem;">✨</span>
+        <span class="panel-heading-text">AI Description</span>
+    </div>
+    <div class="panel-divider"></div>
+</div>""", unsafe_allow_html=True)
+# Render description text via st.markdown so markdown formatting works
+st.markdown(desc_text)
+
+# Detected Details card — fully inline HTML (values are from AI, HTML-safe enough)
+if detail_rows:
+    rows_html = "".join(
+        f'<div class="detail-row">'
+        f'<span class="detail-label">{lbl}</span>'
+        f'<span class="detail-value">{val}</span>'
+        f'</div>'
+        for lbl, val in detail_rows
+    )
+    st.markdown(f"""
+    <div class="glass-panel" style="margin-top:.75rem;">
         <div class="panel-heading">
-            <span style="font-size:1.1rem;">✨</span>
-            <span class="panel-heading-text">AI Description</span>
+            <span style="font-size:1.1rem;">🔍</span>
+            <span class="panel-heading-text">Detected Details</span>
         </div>
         <div class="panel-divider"></div>
+        {rows_html}
     </div>""", unsafe_allow_html=True)
-    # Render description text via st.markdown so markdown formatting works
-    st.markdown(desc_text)
 
-    # Detected Details card — fully inline HTML (values are from AI, HTML-safe enough)
-    if detail_rows:
-        rows_html = "".join(
-            f'<div class="detail-row">'
-            f'<span class="detail-label">{lbl}</span>'
-            f'<span class="detail-value">{val}</span>'
-            f'</div>'
-            for lbl, val in detail_rows
-        )
-        st.markdown(f"""
-        <div class="glass-panel" style="margin-top:.75rem;">
-            <div class="panel-heading">
-                <span style="font-size:1.1rem;">🔍</span>
-                <span class="panel-heading-text">Detected Details</span>
-            </div>
-            <div class="panel-divider"></div>
-            {rows_html}
-        </div>""", unsafe_allow_html=True)
+st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
-    st.markdown('<hr class="divider">', unsafe_allow_html=True)
-
-    # Chat history
-    for msg in st.session_state.messages:
-        role = msg["role"]
-        with st.chat_message(role, avatar="👤" if role == "user" else "🤖"):
-            st.markdown(msg["text"])
+# Chat history
+for msg in st.session_state.messages:
+    role = msg["role"]
+    with st.chat_message(role, avatar="👤" if role == "user" else "🤖"):
+        st.markdown(msg["text"])
 
 # Chat input (must be outside all columns to anchor at bottom)
 prompt_in = st.chat_input("Ask anything about this image…")
