@@ -593,24 +593,27 @@ if st.session_state.pending and st.session_state.img_bytes:
 
     with st.spinner("Generating response…"):
         b64 = to_b64(img_pil)
-        # Build full conversation history for the API
-        history = [
-            {"role": "user", "content": "Analyze the provided image."},
-            {"role": "assistant", "content": st.session_state.analysis},
-        ]
-        # Append older chat messages as text
-        for m in st.session_state.messages[:-1]:
-            history.append({"role": m["role"], "content": m["text"]})
-            
-        # Attach the image to the LATEST user message
+        # Flatten conversation history into a single prompt string
+        prompt = f"Context (your previous analysis of the image):\n{st.session_state.analysis}\n\n"
+        if len(st.session_state.messages) > 1:
+            prompt += "Conversation history:\n"
+            for m in st.session_state.messages[:-1]:
+                speaker = "User" if m["role"] == "user" else "Assistant"
+                prompt += f"{speaker}: {m['text']}\n"
+                
         latest_user_text = st.session_state.messages[-1]["text"]
-        history.append({
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                {"type": "text", "text": latest_user_text},
-            ]
-        })
+        prompt += f"\nUser: {latest_user_text}\nPlease answer the user's question based on the image and context above."
+
+        # Send a SINGLE message containing the image and the flattened text
+        history = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    {"type": "text", "text": prompt}
+                ]
+            }
+        ]
 
         try:
             ai_resp = hf_chat(history)
