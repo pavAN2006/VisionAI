@@ -595,14 +595,22 @@ if st.session_state.pending and st.session_state.img_bytes:
         b64 = to_b64(img_pil)
         # Build full conversation history for the API
         history = [
-            {"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                {"type": "text", "text": "Here is the image for context."},
-            ]},
+            {"role": "user", "content": "Analyze the provided image."},
             {"role": "assistant", "content": st.session_state.analysis},
         ]
-        for m in st.session_state.messages:
+        # Append older chat messages as text
+        for m in st.session_state.messages[:-1]:
             history.append({"role": m["role"], "content": m["text"]})
+            
+        # Attach the image to the LATEST user message
+        latest_user_text = st.session_state.messages[-1]["text"]
+        history.append({
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                {"type": "text", "text": latest_user_text},
+            ]
+        })
 
         try:
             ai_resp = hf_chat(history)
