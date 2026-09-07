@@ -69,7 +69,7 @@ div[data-testid="stSidebar"] .stButton button:hover {
     border: none !important;
     box-shadow: none !important;
 }
-div[data-testid="stSidebar"] .nav-active .stButton button {
+div[data-testid="stSidebar"] button[kind="primary"] {
     background: rgba(99,91,255,0.12) !important;
     color: #635BFF !important;
     font-weight: 600 !important;
@@ -303,24 +303,51 @@ def parse_analysis(text: str) -> tuple[str, list[tuple[str, str]]]:
     return desc, details
 
 
+MODELS_LIST = [
+    "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+    "meta-llama/Llama-3.2-11B-Vision-Instruct",
+    "Qwen/Qwen2-VL-7B-Instruct",
+]
+
+@st.cache_resource
+def get_hf_client(token: str) -> InferenceClient:
+    """Cache the InferenceClient to prevent connection/socket leaks across reruns."""
+    return InferenceClient(api_key=token)
+
 def hf_chat(messages: list) -> str:
-    """Call the HF inference API and return the assistant text."""
+    """Call the HF inference API and return the assistant text, automatically shifting models."""
     token = st.secrets.get("hf_token", "")
     if not token:
         raise ValueError("hf_token not found in secrets.toml")
-    client = InferenceClient(api_key=token)
-    r = client.chat.completions.create(
-        model="deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
-        messages=messages,
-        max_tokens=700,
-    )
-    return r.choices[0].message.content
+    
+    client = get_hf_client(token)
+    
+    last_err = None
+    # Try models starting from the current index
+    for _ in range(len(MODELS_LIST)):
+        model_id = MODELS_LIST[st.session_state.model_idx]
+        # Shift to the next model for the next attempt or next user message
+        st.session_state.model_idx = (st.session_state.model_idx + 1) % len(MODELS_LIST)
+        
+        try:
+            r = client.chat.completions.create(
+                model=model_id,
+                messages=messages,
+                max_tokens=700,
+            )
+            return r.choices[0].message.content
+        except Exception as e:
+            last_err = e
+            continue
+            
+    raise RuntimeError(f"All models failed to respond. Last error: {last_err}")
 
 # ──────────────────────────────────────────────────────────────────────
 # Session state defaults
 # ──────────────────────────────────────────────────────────────────────
 DEFAULTS: dict = {
     "page":      "Workspace",
+    "model_idx": 0,
     "img_hash":  None,
     "img_bytes": None,
     "img_name":  None,
@@ -341,11 +368,9 @@ with st.sidebar:
 
     for label, icon in [("Workspace","✦"), ("History","🕒"), ("Saved","🔖"), ("Settings","⚙️")]:
         is_active = st.session_state.page == label
-        st.markdown(f'<div class="{"nav-active" if is_active else ""}">', unsafe_allow_html=True)
-        if st.button(f"{icon}  {label}", key=f"nav_{label}"):
+        if st.button(f"{icon}  {label}", key=f"nav_{label}", type="primary" if is_active else "secondary"):
             st.session_state.page = label
             st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("""
     <div class="profile-strip">
@@ -409,7 +434,7 @@ if st.session_state.page == "Settings":
     st.markdown('<div class="page-header">⚙️ Settings</div>', unsafe_allow_html=True)
     st.markdown('<div class="page-sub">Application preferences.</div>', unsafe_allow_html=True)
     for label, value, sub in [
-        ("🤖 AI Model",        "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp", "Active vision model"),
+        ("🤖 AI Model",        "Auto-shifting (DeepSeek, Llama, Qwen)", "Active vision model"),
         ("🔑 API Token",       "Configured via secrets.toml",              "Stored securely"),
         ("🎨 Theme",           "Dark Mode",                                "Default appearance"),
         ("📁 Max Upload",      "10 MB",                                    "Set in config.toml"),
