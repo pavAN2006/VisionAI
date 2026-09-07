@@ -1,13 +1,15 @@
 """
 VisionAI — AI-Powered Image Understanding
-=========================================
-Model: deepseek-ai/DeepSeek-V4-Flash-Vision-Exp
+==========================================
+Backend: OpenRouter API (100% Free Vision Models)
 """
 
 import re
+import json
+import time
+import requests
 import streamlit as st
 from PIL import Image
-from huggingface_hub import InferenceClient
 import base64
 import io
 
@@ -247,6 +249,19 @@ div[data-testid="column"] .stButton button:hover {
 """, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────────────
+# OpenRouter config
+# ──────────────────────────────────────────────────────────────────────
+OPENROUTER_BASE = "https://openrouter.ai/api/v1/chat/completions"
+
+# 100% Free vision-capable models on OpenRouter (tried in order, falls back on rate limit/error)
+MODELS_LIST = [
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "dots-studio/dots-3-note-preview:free",
+]
+
+# ──────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────
 def validate_image(f):
@@ -270,77 +285,136 @@ def to_b64(img: Image.Image) -> str:
     """Resize to max 1024px and encode as JPEG base64."""
     buf = io.BytesIO()
     rgb = img.convert("RGB")
-    rgb.thumbnail((1024, 1024))
-    rgb.save(buf, "JPEG", quality=85)
+    rgb.thumbnail((512, 512))
+    rgb.save(buf, "JPEG", quality=70)
     return base64.b64encode(buf.getvalue()).decode()
 
 
 def parse_analysis(text: str) -> tuple[str, list[tuple[str, str]]]:
     """Split AI response into (description, [(label, value), ...])."""
-    desc = text
+    # 1. Strip XML think blocks if present
+    clean_text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+    # 2. Strip explicit 'Thinking Process:' preamble if present
+    clean_text = re.sub(r"(?is)^.*?Thinking Process:.*?(?=(##\s*✨|##\s*🔍|✨\s*AI|\n\n\b[A-Z]))", "", clean_text)
+
+    # 3. If '## ✨ AI Description' exists, discard any lingering preamble before it
+    desc_match = re.search(r"(?:##\s*)?(?:✨|\u2728)?\s*AI Description\s*:?", clean_text, flags=re.IGNORECASE)
+    if desc_match:
+        clean_text = clean_text[desc_match.end():]
+
+    # Clean leading headings from description
+    for heading in ["## ✨ AI Description", "## \u2728 AI Description", "✨ AI Description", "AI Description:"]:
+        clean_text = clean_text.replace(heading, "").strip()
+
+    desc = clean_text.strip()
     details: list[tuple[str, str]] = []
 
     split_markers = [
         "## 🔍 Detected Details",
         "## \U0001f50d Detected Details",
+        "### 🔍 Detected Details",
         "🔍 Detected Details",
+        "## Detected Details",
+        "Detected Details:",
+        "## Key Details",
+        "Key Details:",
     ]
     for marker in split_markers:
-        if marker in text:
-            parts = text.split(marker, 1)
+        if marker in desc:
+            parts = desc.split(marker, 1)
             desc = parts[0].strip()
             for line in parts[1].splitlines():
                 line = line.strip()
-                m = re.match(r"[-*]?\s*\*{0,2}([^:*]+)\*{0,2}:\s*(.+)", line)
+                m = re.match(r"[-*•]?\s*\*{0,2}([^:*]+)\*{0,2}:\s*(.+)", line)
                 if m:
                     details.append((m.group(1).strip(), m.group(2).strip()))
             break
 
-    # Strip the description heading if the model echoed it
-    for heading in ["## ✨ AI Description", "## \u2728 AI Description", "✨ AI Description"]:
-        desc = desc.replace(heading, "").strip()
-
     return desc, details
 
 
-MODELS_LIST = [
-    "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
-    "meta-llama/Llama-3.2-11B-Vision-Instruct",
-    "Qwen/Qwen2-VL-7B-Instruct",
-]
+def or_chat(messages: list, token: str) -> str:
+    """
+    Call OpenRouter with automatic model fallback.
+    Tries each free vision model in MODELS_LIST in round-robin order starting
+    from session_state.model_idx. Returns assistant text on success.
+    """
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://visionai.streamlit.app",
+        "X-Title": "VisionAI Studio",
+    }
 
-@st.cache_resource
-def get_hf_client(token: str) -> InferenceClient:
-    """Cache the InferenceClient to prevent connection/socket leaks across reruns."""
-    return InferenceClient(api_key=token)
-
-def hf_chat(messages: list) -> str:
-    """Call the HF inference API and return the assistant text, automatically shifting models."""
-    token = st.secrets.get("hf_token", "")
-    if not token:
-        raise ValueError("hf_token not found in secrets.toml")
-    
-    client = get_hf_client(token)
-    
-    last_err = None
-    # Try models starting from the current index
+    errors_log = []
     for _ in range(len(MODELS_LIST)):
         model_id = MODELS_LIST[st.session_state.model_idx]
-        # Shift to the next model for the next attempt or next user message
         st.session_state.model_idx = (st.session_state.model_idx + 1) % len(MODELS_LIST)
-        
-        try:
-            r = client.chat.completions.create(
-                model=model_id,
-                messages=messages,
-                max_tokens=700,
-            )
-            return r.choices[0].message.content
-        except Exception as e:
-            last_err = e
-            continue
-            
-    raise RuntimeError(f"All models failed to respond. Last error: {last_err}")
+
+        payload = {
+            "model": model_id,
+            "messages": messages,
+            "max_tokens": 1200,
+        }
+        for attempt in range(2):
+            try:
+                resp = requests.post(
+                    OPENROUTER_BASE,
+                    headers=headers,
+                    json=payload,
+                    timeout=60,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if "error" in data:
+                        err_msg = data["error"].get("message", str(data["error"]))
+                        errors_log.append(f"{model_id}: {err_msg}")
+                        break
+
+                    choices = data.get("choices")
+                    if not choices:
+                        errors_log.append(f"{model_id}: No choices returned")
+                        break
+
+                    msg_obj = choices[0].get("message", {})
+                    content = (
+                        msg_obj.get("content")
+                        or msg_obj.get("reasoning")
+                        or msg_obj.get("reasoning_content")
+                        or ""
+                    )
+                    if content and content.strip():
+                        return content.strip()
+                    errors_log.append(f"{model_id}: Empty response text")
+                    break
+                elif resp.status_code in (429, 503):
+                    if attempt == 0:
+                        time.sleep(1.5)
+                        continue
+                    errors_log.append(f"{model_id}: Rate limited (429/503)")
+                    break
+                else:
+                    try:
+                        err_data = resp.json()
+                        msg = err_data.get("error", {}).get("message", resp.text)
+                    except Exception:
+                        msg = resp.text
+                    errors_log.append(f"{model_id} (error {resp.status_code}): {msg}")
+                    break
+            except requests.exceptions.Timeout:
+                errors_log.append(f"{model_id}: Timed out")
+                break
+            except Exception as e:
+                errors_log.append(f"{model_id}: {str(e)}")
+                break
+
+    formatted_errors = "\n• " + "\n• ".join(errors_log)
+    raise RuntimeError(
+        f"All models failed:\n{formatted_errors}\n\n"
+        "Please check your OpenRouter API key and settings at openrouter.ai/settings/privacy."
+    )
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Session state defaults
@@ -384,10 +458,16 @@ with st.sidebar:
 # ──────────────────────────────────────────────────────────────────────
 # API token guard
 # ──────────────────────────────────────────────────────────────────────
-if not st.secrets.get("hf_token", ""):
+_api_token = (
+    st.secrets.get("openrouter_api_key", "")
+    or st.secrets.get("openrouter_key", "")
+    or st.secrets.get("openrouter_token", "")
+)
+if not _api_token:
     st.markdown(
-        '<div class="err-strip">⚠️ <b>HF token missing.</b> '
-        'Add <code>hf_token = "hf_..."</code> to <code>.streamlit/secrets.toml</code>.</div>',
+        '<div class="err-strip">⚠️ <b>OpenRouter API key missing.</b> '
+        'Add <code>openrouter_api_key = "sk-or-v1-..."</code> to <code>.streamlit/secrets.toml</code>.<br><br>'
+        '👉 Get a 100% free key (no credit card needed) at <a href="https://openrouter.ai/keys" target="_blank" style="color:#A5B4FC;">openrouter.ai/keys</a></div>',
         unsafe_allow_html=True,
     )
     st.stop()
@@ -433,12 +513,14 @@ if st.session_state.page == "Saved":
 if st.session_state.page == "Settings":
     st.markdown('<div class="page-header">⚙️ Settings</div>', unsafe_allow_html=True)
     st.markdown('<div class="page-sub">Application preferences.</div>', unsafe_allow_html=True)
+    current_model = MODELS_LIST[st.session_state.model_idx % len(MODELS_LIST)]
     for label, value, sub in [
-        ("🤖 AI Model",        "Auto-shifting (DeepSeek, Llama, Qwen)", "Active vision model"),
-        ("🔑 API Token",       "Configured via secrets.toml",              "Stored securely"),
-        ("🎨 Theme",           "Dark Mode",                                "Default appearance"),
-        ("📁 Max Upload",      "10 MB",                                    "Set in config.toml"),
-        ("🌐 Language",        "English",                                  "Interface language"),
+        ("🤖 AI Backend",     "OpenRouter (100% Free Vision Models)",     "Auto-shifts across available free models"),
+        ("🎯 Current Model",  current_model,                              "Round-robin across free vision models"),
+        ("🔑 API Key",        "Configured via secrets.toml",              "Stored securely"),
+        ("🎨 Theme",          "Dark Mode",                                "Default appearance"),
+        ("📁 Max Upload",     "10 MB",                                    "Set in config.toml"),
+        ("🌐 Language",       "English",                                  "Interface language"),
     ]:
         st.markdown(f"""
         <div class="setting-row">
@@ -509,46 +591,38 @@ if st.session_state.analysis is None:
         with st.spinner("Analyzing image…"):
             try:
                 b64 = to_b64(img_pil)
-                resp = hf_chat([{
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                        {"type": "text", "text": """\
-You are VisionAI, an AI image understanding assistant.
+                resp = or_chat(
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                            {"type": "text", "text": """\
+You are VisionAI, an expert image understanding assistant.
 
-Analyze the uploaded image carefully and describe only what is visibly present. Do not guess, assume, or invent details.
+CRITICAL INSTRUCTIONS:
+- DO NOT write any "Thinking Process:", thought tags, or meta-commentary.
+- Start IMMEDIATELY with the paragraph description.
 
-Follow this exact output format:
+Provide your response in this EXACT order and format:
 
 ## ✨ AI Description
-Write 1–2 natural paragraphs describing the image.
-
-Include, when clearly visible:
-1. Overall scene — briefly explain what the image shows.
-2. Main subjects — identify the important people, animals, objects, or elements.
-3. Actions — describe what the subjects are doing.
-4. Environment — describe the location, background, and surroundings.
-5. Important details — mention notable colors, clothing, objects, positions, lighting, or other visible details.
-6. Visible text — accurately mention readable text appearing in the image.
+Write 1–2 detailed, natural paragraphs describing the complete scene, subjects, actions, colors, setting, lighting, and any visible text.
 
 ## 🔍 Detected Details
-- **Subjects:** List the main subjects.
-- **Action:** Describe what they are doing.
-- **Location:** Describe the apparent setting.
-- **Environment:** Describe important surroundings.
-- **Mood:** Describe the visual atmosphere only if it can reasonably be inferred from the image.
+- **Subjects:** Key people, animals, or objects
+- **Action:** Primary action or activities happening
+- **Location:** Apparent setting and place
+- **Environment:** Background and surroundings
+- **Mood:** Visual atmosphere and lighting style
 
 Rules:
-- Describe only information supported by the image.
-- Never invent names, locations, events, emotions, or objects.
-- If something is uncertain, use phrases such as "appears to be" or "possibly."
-- Do not repeat the same information.
-- Keep the description clear, natural, and informative.
-- Do not mention that you are an AI.
-- Do not describe your analysis process.
-- If text is present but unreadable, say "Unreadable text is visible.\""""}
-                    ]
-                }])
+- Describe only what is clearly visible in the image.
+- Do not repeat information between the paragraph and details.
+- Never output reasoning or analysis process.\""""}
+                        ]
+                    }],
+                    token=_api_token,
+                )
                 st.session_state.analysis = resp
                 st.rerun()
             except Exception as e:
@@ -617,7 +691,7 @@ if st.session_state.pending and st.session_state.img_bytes:
             for m in st.session_state.messages[:-1]:
                 speaker = "User" if m["role"] == "user" else "Assistant"
                 prompt += f"{speaker}: {m['text']}\n"
-                
+
         latest_user_text = st.session_state.messages[-1]["text"]
         prompt += f"\nUser: {latest_user_text}\nPlease answer the user's question based on the image and context above."
 
@@ -633,7 +707,7 @@ if st.session_state.pending and st.session_state.img_bytes:
         ]
 
         try:
-            ai_resp = hf_chat(history)
+            ai_resp = or_chat(history, token=_api_token)
             st.session_state.messages.append({"role": "assistant", "text": ai_resp})
         except Exception as e:
             st.session_state.messages.append({"role": "assistant", "text": f"❌ {e}"})
