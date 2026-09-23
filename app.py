@@ -900,7 +900,6 @@ if st.session_state.page == "Settings":
         ("🎯 Current Model",  current_model,                              "Round-robin across free vision models"),
         ("📊 Model Pool",     f"{len(MODELS_LIST)} models",              models_display),
         ("🧩 Analysis Modes", f"{len(ANALYSIS_MODES)} modes",            modes_display),
-        ("🔑 API Key",        "Configured via secrets.toml",              "Stored securely"),
         ("🎨 Theme",          "Dark Mode",                                "Default appearance"),
         ("📁 Max Upload",     "10 MB",                                    "Set in config.toml"),
         ("🌐 Language",       "English",                                  "Interface language"),
